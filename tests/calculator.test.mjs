@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateComparison } from '../lib/calculator.js';
+import { calculateComparison, parseCurrentBillCreditPlan } from '../lib/calculator.js';
 
 function usage(beginDate, endDate, usageKwh, chargeAmount = null) {
   return { beginDate, endDate, usageKwh, chargeAmount, canceled: 'N', estimated: 'N', days: 30 };
@@ -11,6 +11,7 @@ const customer = {
   serviceAddress: '100 Test St, Houston TX',
   meterNumber: 'M100',
   commodityPrice: 0.10,
+  pricingPlan: 'Non Inclusive_ERCOT_RESI_FP_NO_SECU_CHRG',
   contractStart: 'Jan 1, 2026',
   contractEnd: 'Jun 30, 2026',
   usageRows: [
@@ -28,6 +29,13 @@ const customer = {
     usage('Dec 1, 2025', 'Dec 31, 2025', 900)
   ]
 };
+
+test('parses Titanium current bill-credit pricing plan format', () => {
+  const parsed = parseCurrentBillCreditPlan('Non Inclusive_1000_kwh_Usage_C\nredit_Plan_$100');
+  assert.equal(parsed.hasCredit, true);
+  assert.equal(parsed.creditThresholdKwh, 1000);
+  assert.equal(parsed.creditAmount, 100);
+});
 
 test('fixed plan compares energy only across proposed contract term', () => {
   const result = calculateComparison(customer, {
@@ -47,11 +55,44 @@ test('fixed plan compares energy only across proposed contract term', () => {
   assert.equal(result.monthly[0].proposedCost, 144);
   assert.equal(result.monthly[0].difference, 36);
   assert.equal(result.efl.hasCredit, false);
+  assert.equal(result.currentPlan.hasCredit, false);
+  assert.equal(result.comparison.usesDeliveryModel, false);
   assert.equal(result.display.savings, true);
   assert.equal(result.totals.difference, 174);
 });
 
-test('bill credit applies only in months that meet the threshold', () => {
+test('current Titanium bill credit is applied month by month with proposed EFL TDU charges', () => {
+  const creditCustomer = {
+    ...customer,
+    pricingPlan: 'Non Inclusive_1000_kwh_Usage_Credit_Plan_$100'
+  };
+
+  const result = calculateComparison(creditCustomer, {
+    energyRateCents: 8,
+    baseChargeMonthly: 0,
+    deliveryPerKwhCents: 5,
+    deliveryMonthly: 5,
+    contractTermMonths: 6,
+    creditAmount: 0,
+    creditThresholdKwh: null
+  });
+
+  assert.equal(result.currentPlan.hasCredit, true);
+  assert.equal(result.currentPlan.creditThresholdKwh, 1000);
+  assert.equal(result.currentPlan.creditAmount, 100);
+  assert.equal(result.comparison.usesDeliveryModel, true);
+
+  assert.equal(result.monthly[0].currentCreditApplied, true);
+  assert.equal(result.monthly[0].currentCreditAmountApplied, 100);
+  assert.equal(result.monthly[0].currentCost, 175);
+  assert.equal(result.monthly[0].proposedCost, 239);
+  assert.equal(result.monthly[0].difference, -64);
+
+  assert.equal(result.monthly[5].currentCreditApplied, false);
+  assert.equal(result.monthly[5].currentCreditAmountApplied, 0);
+});
+
+test('proposed bill credit applies only in months that meet the threshold', () => {
   const result = calculateComparison(customer, {
     energyRateCents: 13,
     baseChargeMonthly: 0,
@@ -63,10 +104,33 @@ test('bill credit applies only in months that meet the threshold', () => {
   });
 
   assert.equal(result.efl.hasCredit, true);
-  assert.equal(result.monthly[0].creditApplied, true);
-  assert.equal(result.monthly[4].creditApplied, true);
-  assert.equal(result.monthly[5].creditApplied, false);
-  assert.equal(result.monthly[5].creditAmountApplied, 0);
+  assert.equal(result.comparison.usesDeliveryModel, true);
+  assert.equal(result.monthly[0].proposedCreditApplied, true);
+  assert.equal(result.monthly[4].proposedCreditApplied, true);
+  assert.equal(result.monthly[5].proposedCreditApplied, false);
+  assert.equal(result.monthly[5].proposedCreditAmountApplied, 0);
+});
+
+test('current and proposed bill credits are both modeled when applicable', () => {
+  const creditCustomer = {
+    ...customer,
+    pricingPlan: 'Non Inclusive_1000_kwh_Usage_Credit_Plan_$100'
+  };
+
+  const result = calculateComparison(creditCustomer, {
+    energyRateCents: 13,
+    baseChargeMonthly: 0,
+    deliveryPerKwhCents: 5,
+    deliveryMonthly: 5,
+    contractTermMonths: 6,
+    creditAmount: 125,
+    creditThresholdKwh: 1000
+  });
+
+  assert.equal(result.monthly[0].currentCreditAmountApplied, 100);
+  assert.equal(result.monthly[0].proposedCreditAmountApplied, 125);
+  assert.equal(result.monthly[5].currentCreditAmountApplied, 0);
+  assert.equal(result.monthly[5].proposedCreditAmountApplied, 0);
 });
 
 test('requires at least three complete billing cycles under current contract', () => {
