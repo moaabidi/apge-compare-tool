@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>APG&E Compare Tool</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">APG&amp;E SALES TOOL</div>
+        <h1>Plan comparison</h1>
+      </div>
+      <button id="runButton" class="primary" type="button">Run Comparison</button>
+    </header>
+
+    <div id="status" class="status" hidden></div>
+
+    <section id="emptyState" class="empty-state">
+      <p>Open the customer’s ESG Titanium account and one proposed EFL, then run the comparison.</p>
+    </section>
+
+    <section id="result" class="result" hidden>
+      <div class="identity">
+        <strong id="customerName">Customer</strong>
+        <span id="customerContext"></span>
+      </div>
+
+      <div class="hero">
+        <div id="headlineLabel" class="hero-label">Projected savings on energy</div>
+        <div id="headlineAmount" class="hero-amount">$0.00</div>
+        <div id="subline" class="hero-subline"></div>
+      </div>
+
+      <div class="script-box">
+        <div class="section-label">Suggested wording</div>
+        <p id="salesScript"></p>
+      </div>
+
+      <button id="detailsButton" class="secondary full" type="button" aria-expanded="false">See details</button>
+
+      <div id="details" class="details" hidden>
+        <section class="detail-section">
+          <div class="section-header">
+            <h2>Monthly comparison</h2>
+            <span id="methodBadge" class="badge"></span>
+          </div>
+          <div id="graph" class="graph" aria-label="Monthly current and proposed cost comparison"></div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Month</th>
+                  <th>kWh</th>
+                  <th>Current</th>
+                  <th>Proposed</th>
+                  <th>Difference</th>
+                  <th id="creditHeader">Credit</th>
+                </tr>
+              </thead>
+              <tbody id="monthlyRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="detail-section">
+          <h2>Inputs</h2>
+          <dl id="inputs" class="inputs"></dl>
+        </section>
+
+        <section class="detail-section">
+          <h2>Calculation</h2>
+          <p id="methodology"></p>
+          <div class="formula" id="formula"></div>
+        </section>
+
+        <section class="detail-section compliance-note">
+          <h2>Prototype disclosure</h2>
+          <p>This is a calculation aid, not a guaranteed bill quote. Customer-facing wording is draft language and should be approved by APG&amp;E compliance/legal before production use.</p>
+        </section>
+      </div>
+    </section>
+
+    <section id="manualEfl" class="manual" hidden>
+      <h2>Enter EFL details manually</h2>
+      <p id="manualReason">The extension is having trouble reading this EFL. Enter the missing plan details below.</p>
+      <div class="form-grid">
+        <label>Energy Rate (¢/kWh)<input id="manualEnergyRate" type="number" step="0.00001" min="0"></label>
+        <label>Contract Term (months)<input id="manualTerm" type="number" step="1" min="1"></label>
+        <label>Base Charge ($/month)<input id="manualBase" type="number" step="0.01" min="0" value="0"></label>
+        <label>TDU Delivery (¢/kWh)<input id="manualDeliveryRate" type="number" step="0.00001" min="0" value="0"></label>
+        <label>TDU Monthly Charge ($)<input id="manualDeliveryMonthly" type="number" step="0.01" min="0" value="0"></label>
+        <label>Bill Credit ($)<input id="manualCredit" type="number" step="0.01" min="0" value="0"></label>
+        <label>Credit Threshold (kWh)<input id="manualThreshold" type="number" step="1" min="0"></label>
+      </div>
+      <button id="manualCalculate" class="primary full" type="button">Calculate</button>
+    </section>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
