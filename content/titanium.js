@@ -18,44 +18,59 @@
     if (!node || !(node instanceof Element)) return false;
     const tag = node.tagName.toLowerCase();
     const role = upper(node.getAttribute('role'));
-    return tag === 'a' || tag === 'button' || role === 'BUTTON' || role === 'LINK' || role === 'TAB' || node.hasAttribute('onclick');
+    return tag === 'a' ||
+      tag === 'button' ||
+      role === 'BUTTON' ||
+      role === 'LINK' ||
+      role === 'TAB' ||
+      node.hasAttribute('onclick') ||
+      node.hasAttribute('tabindex') ||
+      node.hasAttribute('aria-haspopup');
+  }
+
+  function clickableAncestor(node, maxDepth = 6) {
+    let current = node;
+    for (let depth = 0; depth < maxDepth && current; depth += 1, current = current.parentElement) {
+      if (isVisible(current) && isClickable(current)) return current;
+    }
+    return null;
   }
 
   function clickElement(node) {
     if (!node) return false;
-    node.scrollIntoView({ block: 'center', inline: 'nearest' });
-    node.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
-    node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-    node.click();
+    const target = clickableAncestor(node) || node;
+    target.scrollIntoView({ block: 'center', inline: 'nearest' });
+    target.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
     return true;
   }
 
-  function findExactLabelElement(label) {
+  function findExactLabelElement(label, { visibleOnly = false } = {}) {
     const target = upper(label);
     const nodes = document.querySelectorAll('body *');
     for (const node of nodes) {
       if (node.children.length > 3) continue;
+      if (visibleOnly && !isVisible(node)) continue;
       if (upper(node.innerText || node.textContent) === target) return node;
     }
     return null;
   }
 
-  function findClickableExactText(text, { visibleOnly = true } = {}) {
+  function findClickableExactText(text, { visibleOnly = true, allowRaw = false } = {}) {
     const target = upper(text);
-    const direct = document.querySelectorAll('a, button, [role="button"], [role="link"], [role="tab"]');
+    const direct = document.querySelectorAll('a, button, [role="button"], [role="link"], [role="tab"], [tabindex], [aria-haspopup]');
     for (const node of direct) {
       if (visibleOnly && !isVisible(node)) continue;
       if (upper(node.innerText || node.textContent) === target) return node;
     }
 
-    const exact = findExactLabelElement(text);
+    const exact = findExactLabelElement(text, { visibleOnly });
     if (!exact) return null;
-    let current = exact;
-    for (let depth = 0; depth < 5 && current; depth += 1, current = current.parentElement) {
-      if ((!visibleOnly || isVisible(current)) && isClickable(current)) return current;
-    }
-    return null;
+    const interactive = clickableAncestor(exact);
+    if (interactive) return interactive;
+    return allowRaw && (!visibleOnly || isVisible(exact)) ? exact : null;
   }
 
   async function waitFor(fn, timeoutMs = 8000, intervalMs = 250) {
@@ -73,19 +88,17 @@
   }
 
   function findAccountLink() {
-    const direct = findClickableExactText('Account');
+    const direct = findClickableExactText('Account', { allowRaw: true });
     if (direct) return direct;
 
-    // Fallback for Titanium builds where the Account heading text is nested in a
-    // clickable card/header element rather than directly on an anchor.
-    const label = findExactLabelElement('Account');
+    const label = findExactLabelElement('Account', { visibleOnly: true });
     if (!label) return null;
     let current = label;
     for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
-      const clickable = current.querySelector?.('a, button, [role="link"], [role="button"]');
+      const clickable = current.querySelector?.('a, button, [role="link"], [role="button"], [tabindex]');
       if (clickable && isVisible(clickable)) return clickable;
     }
-    return null;
+    return label;
   }
 
   function openAccountDetail() {
@@ -98,8 +111,6 @@
       };
     }
 
-    // Respond first so a full-page navigation cannot tear down the message port
-    // before the popup learns that navigation started.
     setTimeout(() => clickElement(accountLink), 75);
     return { ok: true, navigating: true, url: location.href };
   }
@@ -241,60 +252,118 @@
   }
 
   function findTabStripReference() {
-    return findClickableExactText('Details') || findClickableExactText('Service Contracts') || findClickableExactText('Transaction');
+    return findClickableExactText('Details', { allowRaw: true }) ||
+      findClickableExactText('Service Contracts', { allowRaw: true }) ||
+      findClickableExactText('Transaction', { allowRaw: true });
   }
 
-  function findOverflowButton() {
+  function uniqueElements(elements) {
+    return [...new Set(elements.filter(Boolean))];
+  }
+
+  function findOverflowCandidates() {
     const reference = findTabStripReference();
     const referenceRect = reference?.getBoundingClientRect();
-    const candidates = [...document.querySelectorAll('button, a, [role="button"]')]
-      .filter(isVisible)
-      .map((node) => {
-        const text = clean(node.innerText || node.textContent);
-        const aria = clean(node.getAttribute('aria-label'));
-        const title = clean(node.getAttribute('title'));
-        const looksLikeOverflow = /^(?:\.\.\.|…|⋯)$/.test(text) || /more|overflow|additional/i.test(`${aria} ${title}`);
-        if (!looksLikeOverflow) return null;
-        const rect = node.getBoundingClientRect();
-        const yDistance = referenceRect ? Math.abs(rect.top - referenceRect.top) : 0;
-        return { node, yDistance };
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.yDistance - b.yDistance);
+    const edit = findClickableExactText('Edit', { allowRaw: true });
+    const editRect = edit?.getBoundingClientRect();
+    const candidates = [];
 
-    if (candidates[0] && (!referenceRect || candidates[0].yDistance < 80)) return candidates[0].node;
+    // Titanium renders the screenshot-confirmed ellipsis as plain text in some
+    // builds, not as a semantic button. Search every visible element for it and
+    // click its interactive ancestor (or the raw element so delegated handlers fire).
+    for (const node of document.querySelectorAll('body *')) {
+      if (!isVisible(node) || node.children.length > 2) continue;
+      const text = clean(node.innerText || node.textContent);
+      const aria = clean(node.getAttribute('aria-label'));
+      const title = clean(node.getAttribute('title'));
+      if (!/^(?:\.\.\.|…|⋯)$/.test(text) && !/more|overflow|additional/i.test(`${aria} ${title}`)) continue;
 
-    // Screenshot-confirmed fallback: the overflow control sits immediately before
-    // the Edit control in the account tab bar.
-    const edit = findClickableExactText('Edit');
-    if (edit?.parentElement) {
-      const siblings = [...edit.parentElement.querySelectorAll('button, a, [role="button"]')].filter(isVisible);
-      const index = siblings.indexOf(edit);
-      if (index > 0) return siblings[index - 1];
+      const candidate = clickableAncestor(node) || node;
+      const rect = candidate.getBoundingClientRect();
+      const yDistance = referenceRect ? Math.abs(rect.top - referenceRect.top) : 0;
+      const editDistance = editRect ? Math.abs(editRect.left - rect.right) : 0;
+      candidates.push({ candidate, score: yDistance + editDistance * 0.35 });
     }
-    return null;
+
+    // Strong fallback for the exact Titanium layout in the screenshots: probe the
+    // pixels immediately to the left of Edit and take the element underneath the
+    // ellipsis even when it has no text/role/aria metadata.
+    if (editRect) {
+      const y = Math.min(window.innerHeight - 1, Math.max(1, editRect.top + editRect.height / 2));
+      for (const offset of [8, 14, 20, 26, 32, 40, 48, 56, 64]) {
+        const x = editRect.left - offset;
+        if (x <= 0) continue;
+        const stack = document.elementsFromPoint(x, y);
+        for (const node of stack) {
+          if (!(node instanceof Element) || !isVisible(node) || node === edit || edit.contains(node)) continue;
+          const candidate = clickableAncestor(node) || node;
+          const rect = candidate.getBoundingClientRect();
+          if (rect.right > editRect.right || rect.left >= editRect.left) continue;
+          if (Math.abs((rect.top + rect.height / 2) - y) > 35) continue;
+          candidates.push({ candidate, score: offset + 15 });
+          break;
+        }
+      }
+    }
+
+    // Previous semantic-button fallback remains useful on other Titanium builds.
+    for (const node of document.querySelectorAll('button, a, [role="button"], [tabindex], [aria-haspopup]')) {
+      if (!isVisible(node)) continue;
+      const text = clean(node.innerText || node.textContent);
+      const aria = clean(node.getAttribute('aria-label'));
+      const title = clean(node.getAttribute('title'));
+      if (!/^(?:\.\.\.|…|⋯)$/.test(text) && !/more|overflow|additional/i.test(`${aria} ${title}`)) continue;
+      const rect = node.getBoundingClientRect();
+      const yDistance = referenceRect ? Math.abs(rect.top - referenceRect.top) : 0;
+      const editDistance = editRect ? Math.abs(editRect.left - rect.right) : 0;
+      candidates.push({ candidate: node, score: yDistance + editDistance * 0.35 + 5 });
+    }
+
+    return uniqueElements(
+      candidates
+        .sort((a, b) => a.score - b.score)
+        .map((entry) => entry.candidate)
+    );
+  }
+
+  function visibleUsageMenuItem() {
+    return findClickableExactText('Usage', { visibleOnly: true, allowRaw: true });
   }
 
   async function openUsageView() {
     const existing = extractUsageRows();
     if (existing.length) return existing;
 
-    const overflow = findOverflowButton();
-    if (!overflow) {
-      throw new Error('The Titanium account overflow menu (…) could not be found. Make sure the account detail page has finished loading.');
+    // Give the account detail tab time to finish rendering its tab strip.
+    const overflowCandidates = await waitFor(() => {
+      const found = findOverflowCandidates();
+      return found.length ? found : null;
+    }, 8000, 200);
+
+    if (!overflowCandidates) {
+      throw new Error('The Titanium account overflow menu (…) could not be found after waiting for the account detail tabs to load.');
     }
 
-    clickElement(overflow);
-    const usageItem = await waitFor(() => findClickableExactText('Usage'), 3000, 100);
+    let usageItem = null;
+    for (const candidate of overflowCandidates.slice(0, 8)) {
+      clickElement(candidate);
+      usageItem = await waitFor(() => visibleUsageMenuItem(), 900, 75);
+      if (usageItem) break;
+      // Clicking a wrong spatial candidate is harmless; close any accidental menu
+      // by clicking the same candidate again before testing the next one.
+      clickElement(candidate);
+      await sleep(75);
+    }
+
     if (!usageItem) {
-      throw new Error('The Usage option did not appear after opening the Titanium account overflow menu.');
+      throw new Error('The three-dot area was found, but the Usage option did not appear. Titanium may be exposing the overflow trigger through a different DOM element.');
     }
 
     clickElement(usageItem);
     const rows = await waitFor(() => {
       const parsed = extractUsageRows();
       return parsed.length ? parsed : null;
-    }, 10000, 300);
+    }, 12000, 300);
 
     if (!rows) {
       throw new Error('The Usage page opened, but the usage table could not be read before the timeout.');
