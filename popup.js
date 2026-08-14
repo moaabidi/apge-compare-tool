@@ -52,6 +52,21 @@ function isEflTab(tab) {
   }
 }
 
+function customerSummaryUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl || '');
+    if (url.hostname !== TITANIUM_HOST) return '';
+    const marker = '/sets/';
+    const index = url.pathname.indexOf(marker);
+    if (index >= 0) url.pathname = url.pathname.slice(0, index);
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
 function mostRecent(tabs) {
   return [...tabs].sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0] || null;
 }
@@ -79,6 +94,38 @@ async function messageWithInjection(tabId, type) {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content/titanium.js'] });
     return sendTitaniumMessage(tabId, type);
   }
+}
+
+async function waitForTab(tabId, predicate, timeoutMs = 12000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const tab = await chrome.tabs.get(tabId);
+    if (predicate(tab)) return tab;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('Titanium did not finish navigating before the timeout.');
+}
+
+async function ensureCustomerSummary(tab) {
+  const summaryUrl = customerSummaryUrl(tab.url);
+  if (!summaryUrl) throw new Error('The Titanium customer summary URL could not be determined.');
+
+  if (isAccountDetailTab(tab)) {
+    setStatus('Returning Titanium to the customer summary…');
+    await chrome.tabs.update(tab.id, { url: summaryUrl });
+    const summaryTab = await waitForTab(
+      tab.id,
+      (current) => !isAccountDetailTab(current) && current.status === 'complete'
+    );
+    return { tab: summaryTab, summaryUrl };
+  }
+
+  if (tab.status !== 'complete') {
+    const summaryTab = await waitForTab(tab.id, (current) => current.status === 'complete');
+    return { tab: summaryTab, summaryUrl };
+  }
+
+  return { tab, summaryUrl };
 }
 
 async function collectSummaryFields(tabId) {
@@ -122,8 +169,7 @@ async function collectSummaryFields(tabId) {
       }
 
       function serviceAddress() {
-        const lines = linesAfterLabel('SERVICE ADDRESS', 2);
-        return lines.join(', ');
+        return linesAfterLabel('SERVICE ADDRESS', 2).join(', ');
       }
 
       function contractDates() {
@@ -135,7 +181,7 @@ async function collectSummaryFields(tabId) {
           const text = String(current.innerText || '');
           const marker = text.toUpperCase().indexOf('SERVICE CONTRACT');
           if (marker < 0) continue;
-          const nearby = text.slice(marker, marker + 350);
+          const nearby = text.slice(marker, marker + 400);
           const dates = [...nearby.matchAll(datePattern)].map((match) => clean(match[1]));
           if (dates.length >= 2) {
             return { contractStart: dates[0], contractEnd: dates[1] };
@@ -155,6 +201,7 @@ async function collectSummaryFields(tabId) {
         serviceAddress: serviceAddress(),
         meterNumber: firstField('METER NUMBER'),
         commodityPrice: commodityMatch ? Number(commodityMatch[0]) : null,
+        pricingPlan: linesAfterLabel('PRICING PLAN', 8).join(' '),
         contractStart,
         contractEnd,
         sourceUrl: location.href
@@ -166,16 +213,7 @@ async function collectSummaryFields(tabId) {
 }
 
 async function waitForAccountDetail(tabId, timeoutMs = 10000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const tab = await chrome.tabs.get(tabId);
-    if (isAccountDetailTab(tab)) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      return chrome.tabs.get(tabId);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  throw new Error('Titanium did not finish opening the Account page before the timeout.');
+  return waitForTab(tabId, (tab) => isAccountDetailTab(tab) && tab.status === 'complete', timeoutMs);
 }
 
 async function ensureAccountDetail(tab) {
@@ -190,6 +228,16 @@ async function ensureAccountDetail(tab) {
   return waitForAccountDetail(tab.id);
 }
 
+async function restoreCustomerSummary(tabId, summaryUrl) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!isAccountDetailTab(tab)) return;
+    await chrome.tabs.update(tabId, { url: summaryUrl });
+  } catch {
+    // The comparison result is still valid if the rep closed the Titanium tab.
+  }
+}
+
 function preferSummary(summary, detail, key) {
   const value = summary?.[key];
   if (value !== undefined && value !== null && value !== '') return value;
@@ -197,15 +245,25 @@ function preferSummary(summary, detail, key) {
 }
 
 async function collectTitanium(tab) {
+  const normalized = await ensureCustomerSummary(tab);
+  const summaryTab = normalized.tab;
+  const summaryUrl = normalized.summaryUrl;
+
   setStatus('Reading the customer summary in Titanium…');
-  const summary = await collectSummaryFields(tab.id);
+  const summary = await collectSummaryFields(summaryTab.id);
 
-  const accountTab = await ensureAccountDetail(tab);
-  setStatus('Opening Usage and reading billing history in Titanium…');
+  let detail = {};
+  try {
+    const accountTab = await ensureAccountDetail(summaryTab);
+    setStatus('Opening Usage and reading billing history in Titanium…');
 
-  const response = await messageWithInjection(accountTab.id, 'APGE_COMPARE_COLLECT_TITANIUM');
-  if (!response?.ok) throw new Error(response?.error || 'Titanium data could not be read.');
-  const detail = response.data || {};
+    const response = await messageWithInjection(accountTab.id, 'APGE_COMPARE_COLLECT_TITANIUM');
+    if (!response?.ok) throw new Error(response?.error || 'Titanium data could not be read.');
+    detail = response.data || {};
+  } finally {
+    setStatus('Returning Titanium to the customer summary…');
+    await restoreCustomerSummary(summaryTab.id, summaryUrl);
+  }
 
   const customer = {
     ...detail,
@@ -213,6 +271,7 @@ async function collectTitanium(tab) {
     serviceAddress: preferSummary(summary, detail, 'serviceAddress'),
     meterNumber: preferSummary(summary, detail, 'meterNumber'),
     commodityPrice: preferSummary(summary, detail, 'commodityPrice'),
+    pricingPlan: preferSummary(summary, detail, 'pricingPlan'),
     contractStart: preferSummary(summary, detail, 'contractStart'),
     contractEnd: preferSummary(summary, detail, 'contractEnd')
   };
@@ -250,6 +309,22 @@ function formatRateCents(value) {
   return `${Number(value || 0).toFixed(3)}¢/kWh`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function setDetailsOpen(open) {
+  $('details').hidden = !open;
+  $('detailsButton').setAttribute('aria-expanded', String(open));
+  const label = $('detailsButton').querySelector('span');
+  if (label) label.textContent = open ? 'Hide details' : 'See details';
+}
+
 function renderGraph(monthly) {
   const root = $('graph');
   if (!monthly?.length) {
@@ -278,11 +353,11 @@ function renderGraph(monthly) {
 
   const labels = monthly.map((row, index) => {
     if (monthly.length > 12 && index % 2 === 1) return '';
-    return `<text x="${x(index)}" y="${height - 8}" text-anchor="middle">${row.month.replace(' ', '’')}</text>`;
+    return `<text x="${x(index)}" y="${height - 8}" text-anchor="middle">${escapeHtml(row.month.replace(' ', '’'))}</text>`;
   }).join('');
 
-  const currentDots = monthly.map((row, index) => `<circle class="dot-current" cx="${x(index)}" cy="${y(row.currentCost)}" r="2.7"><title>${row.month}: current ${formatMoney(row.currentCost)}</title></circle>`).join('');
-  const proposedDots = monthly.map((row, index) => `<circle class="dot-proposed" cx="${x(index)}" cy="${y(row.proposedCost)}" r="2.7"><title>${row.month}: proposed ${formatMoney(row.proposedCost)}</title></circle>`).join('');
+  const currentDots = monthly.map((row, index) => `<circle class="dot-current" cx="${x(index)}" cy="${y(row.currentCost)}" r="2.7"><title>${escapeHtml(row.month)}: current ${formatMoney(row.currentCost)}</title></circle>`).join('');
+  const proposedDots = monthly.map((row, index) => `<circle class="dot-proposed" cx="${x(index)}" cy="${y(row.proposedCost)}" r="2.7"><title>${escapeHtml(row.month)}: proposed ${formatMoney(row.proposedCost)}</title></circle>`).join('');
 
   root.innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Current versus proposed monthly cost">
@@ -306,14 +381,120 @@ function addInput(label, value) {
   $('inputs').appendChild(wrapper);
 }
 
+function renderTermSummary(result) {
+  const netClass = result.display.savings ? 'positive' : 'negative';
+  const netLabel = result.display.savings ? 'Savings' : 'Increase';
+  $('termSummary').innerHTML = `
+    <div class="term-card"><span>Current total</span><strong>${formatMoney(result.totals.current)}</strong></div>
+    <div class="term-card"><span>Proposed total</span><strong>${formatMoney(result.totals.proposed)}</strong></div>
+    <div class="term-card net ${netClass}"><span>${netLabel}</span><strong>${formatMoney(Math.abs(result.totals.difference))}</strong></div>`;
+}
+
+function creditSummary(row, result) {
+  const parts = [];
+  if (result.currentPlan?.hasCredit) {
+    parts.push(`Current ${row.currentCreditApplied ? `-${formatMoney(row.currentCreditAmountApplied)}` : '$0.00'}`);
+  }
+  if (result.efl?.hasCredit) {
+    parts.push(`Proposed ${row.proposedCreditApplied ? `-${formatMoney(row.proposedCreditAmountApplied)}` : '$0.00'}`);
+  }
+  return parts.join(' · ');
+}
+
+function billLine(label, value, className = '') {
+  return `<div class="bill-line ${className}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`;
+}
+
+function renderBillBreakdowns(result) {
+  const root = $('billBreakdowns');
+  root.innerHTML = '';
+
+  const usesDelivery = Boolean(result.comparison?.usesDeliveryModel);
+  const currentRate = Number(result.customer.commodityPrice) * 100;
+  const proposedRate = Number(result.efl.energyRateCents);
+  const tduRate = Number(result.efl.deliveryPerKwhCents) || 0;
+  const tduMonthly = Number(result.efl.deliveryMonthly) || 0;
+  const baseCharge = Number(result.efl.baseChargeMonthly) || 0;
+
+  for (const row of result.monthly) {
+    const card = document.createElement('article');
+    card.className = 'bill-card';
+
+    const differenceClass = row.difference >= 0 ? 'positive' : 'negative';
+    const differenceLabel = row.difference >= 0
+      ? `Save ${formatMoney(row.difference)}`
+      : `Increase ${formatMoney(Math.abs(row.difference))}`;
+
+    let currentLines = billLine(`Energy @ ${formatRateCents(currentRate)}`, formatMoney(row.currentEnergy));
+    let proposedLines = billLine(`Energy @ ${formatRateCents(proposedRate)}`, formatMoney(row.proposedEnergyOnly));
+
+    if (baseCharge > 0) proposedLines += billLine('Base charge', formatMoney(row.proposedBaseCharge));
+
+    if (usesDelivery) {
+      currentLines += billLine(`TDU usage @ ${formatRateCents(tduRate)}`, formatMoney(row.deliveryUsage));
+      proposedLines += billLine(`TDU usage @ ${formatRateCents(tduRate)}`, formatMoney(row.deliveryUsage));
+      if (tduMonthly > 0) {
+        currentLines += billLine('TDU monthly charge', formatMoney(row.deliveryMonthly));
+        proposedLines += billLine('TDU monthly charge', formatMoney(row.deliveryMonthly));
+      }
+      if (result.currentPlan?.hasCredit) {
+        const currentCreditText = row.currentCreditApplied
+          ? `-${formatMoney(row.currentCreditAmountApplied)}`
+          : '$0.00 (threshold not met)';
+        currentLines += billLine('Bill credit', currentCreditText, 'credit');
+      }
+      if (result.efl?.hasCredit) {
+        const proposedCreditText = row.proposedCreditApplied
+          ? `-${formatMoney(row.proposedCreditAmountApplied)}`
+          : '$0.00 (threshold not met)';
+        proposedLines += billLine('Bill credit', proposedCreditText, 'credit');
+      }
+    }
+
+    currentLines += billLine('Modeled total', formatMoney(row.currentCost), 'total');
+    proposedLines += billLine('Modeled total', formatMoney(row.proposedCost), 'total');
+
+    const currentMath = usesDelivery
+      ? `${Math.round(row.usageKwh).toLocaleString()} kWh × ${formatRateCents(currentRate)} + ${formatMoney(row.deliveryUsage)} TDU usage + ${formatMoney(row.deliveryMonthly)} TDU monthly${row.currentCreditApplied ? ` − ${formatMoney(row.currentCreditAmountApplied)} credit` : ''} = ${formatMoney(row.currentCost)}`
+      : `${Math.round(row.usageKwh).toLocaleString()} kWh × ${formatRateCents(currentRate)} = ${formatMoney(row.currentCost)}`;
+
+    const proposedMath = usesDelivery
+      ? `${Math.round(row.usageKwh).toLocaleString()} kWh × ${formatRateCents(proposedRate)} + ${formatMoney(baseCharge)} base + ${formatMoney(row.deliveryUsage)} TDU usage + ${formatMoney(row.deliveryMonthly)} TDU monthly${row.proposedCreditApplied ? ` − ${formatMoney(row.proposedCreditAmountApplied)} credit` : ''} = ${formatMoney(row.proposedCost)}`
+      : `${Math.round(row.usageKwh).toLocaleString()} kWh × ${formatRateCents(proposedRate)} + ${formatMoney(baseCharge)} base = ${formatMoney(row.proposedCost)}`;
+
+    card.innerHTML = `
+      <div class="bill-card-header">
+        <strong>${escapeHtml(row.month)} · ${Math.round(row.usageKwh).toLocaleString()} kWh</strong>
+        <span class="${differenceClass}">${differenceLabel}</span>
+      </div>
+      <div class="bill-columns">
+        <div class="bill-column"><h3>Current plan</h3>${currentLines}</div>
+        <div class="bill-column"><h3>Proposed plan</h3>${proposedLines}</div>
+        <div class="bill-math">
+          <div><strong>Current:</strong> ${escapeHtml(currentMath)}</div>
+          <div><strong>Proposed:</strong> ${escapeHtml(proposedMath)}</div>
+        </div>
+      </div>`;
+
+    root.appendChild(card);
+  }
+}
+
 function renderResult(result) {
   state.result = result;
   $('emptyState').hidden = true;
   $('manualEfl').hidden = true;
   $('result').hidden = false;
+  setDetailsOpen(false);
+
+  $('result').classList.remove('savings', 'increase');
+  $('result').classList.add(result.display.savings ? 'savings' : 'increase');
 
   $('customerName').textContent = result.customer.name || 'Customer';
-  const context = [result.customer.serviceAddress, result.customer.meterNumber ? `Meter ${result.customer.meterNumber}` : ''].filter(Boolean).join(' • ');
+  const context = [
+    result.customer.serviceAddress,
+    result.customer.meterNumber ? `Meter ${result.customer.meterNumber}` : ''
+  ].filter(Boolean).join(' • ');
   $('customerContext').textContent = context;
   $('headlineLabel').textContent = result.display.headlineLabel;
   $('headlineAmount').textContent = formatMoney(result.display.headlineAmount);
@@ -323,39 +504,57 @@ function renderResult(result) {
   $('methodology').textContent = result.projection.methodology;
   $('formula').textContent = result.display.formula;
 
-  $('creditHeader').hidden = !result.efl.hasCredit;
+  renderTermSummary(result);
+
+  const hasAnyCredit = Boolean(result.currentPlan?.hasCredit || result.efl?.hasCredit);
+  $('creditHeader').hidden = !hasAnyCredit;
   $('monthlyRows').innerHTML = '';
+
   for (const row of result.monthly) {
     const tr = document.createElement('tr');
-    if (row.sourceType !== 'season-matched historical usage' || row.sourceEstimated) tr.classList.add('estimated-row');
+    if (row.sourceType !== 'season-matched historical usage' || row.sourceEstimated) {
+      tr.classList.add('estimated-row');
+    }
+
     const differenceClass = row.difference >= 0 ? 'positive' : 'negative';
-    const differenceText = row.difference >= 0 ? `Save ${formatMoney(row.difference)}` : `+${formatMoney(Math.abs(row.difference))}`;
-    const credit = result.efl.hasCredit ? (row.creditApplied ? `-${formatMoney(row.creditAmountApplied)}` : 'No') : '';
+    const differenceText = row.difference >= 0
+      ? `Save ${formatMoney(row.difference)}`
+      : `+${formatMoney(Math.abs(row.difference))}`;
+
     tr.innerHTML = `
-      <td title="${row.sourceType}">${row.month}</td>
+      <td title="${escapeHtml(row.sourceType)}">${escapeHtml(row.month)}</td>
       <td>${Math.round(row.usageKwh).toLocaleString()}</td>
       <td>${formatMoney(row.currentCost)}</td>
       <td>${formatMoney(row.proposedCost)}</td>
       <td class="${differenceClass}">${differenceText}</td>
-      ${result.efl.hasCredit ? `<td>${credit}</td>` : ''}
+      ${hasAnyCredit ? `<td>${escapeHtml(creditSummary(row, result))}</td>` : ''}
     `;
     $('monthlyRows').appendChild(tr);
   }
 
   $('inputs').innerHTML = '';
   addInput('Current Commodity Price', formatRateDollarAsCents(result.customer.commodityPrice));
+  addInput('Current Pricing Plan', result.customer.pricingPlan || 'Fixed rate');
   addInput('Proposed Energy Rate', formatRateCents(result.efl.energyRateCents));
+  addInput('Proposed Base Charge', `${formatMoney(result.efl.baseChargeMonthly || 0)}/month`);
   addInput('Current Contract', `${result.customer.contractStart || 'Unknown'} to ${result.customer.contractEnd || 'Unknown'}`);
   addInput('Proposed Term', `${result.efl.contractTermMonths} months`);
   addInput('Usage History Found', `${result.projection.historyCount} billing cycles`);
   addInput('Current-Contract Cycles', `${result.projection.currentContractHistoryCount} complete cycles`);
   addInput('Projection', result.projection.estimatedMonths ? `${result.projection.estimatedMonths} month(s) estimated` : 'All months season matched');
-  if (result.efl.hasCredit) {
-    addInput('Bill Credit', `${formatMoney(result.efl.creditAmount)} at ≥ ${Number(result.efl.creditThresholdKwh).toLocaleString()} kWh`);
-    addInput('Current TDU Used', `${formatRateCents(result.efl.deliveryPerKwhCents)} + ${formatMoney(result.efl.deliveryMonthly)}/month`);
+
+  if (result.currentPlan?.hasCredit) {
+    addInput('Current Bill Credit', `${formatMoney(result.currentPlan.creditAmount)} at ≥ ${Number(result.currentPlan.creditThresholdKwh).toLocaleString()} kWh`);
+  }
+  if (result.efl?.hasCredit) {
+    addInput('Proposed Bill Credit', `${formatMoney(result.efl.creditAmount)} at ≥ ${Number(result.efl.creditThresholdKwh).toLocaleString()} kWh`);
+  }
+  if (result.comparison?.usesDeliveryModel) {
+    addInput('TDU Assumption', `${formatRateCents(result.efl.deliveryPerKwhCents)} + ${formatMoney(result.efl.deliveryMonthly)}/month from proposed EFL`);
   }
 
   renderGraph(result.monthly);
+  renderBillBreakdowns(result);
 }
 
 function prefillManual(partial = {}) {
@@ -404,8 +603,8 @@ async function runComparison() {
     const result = calculateComparison(state.customer, parsedEfl);
     await saveResult(result);
     renderResult(result);
-    setStatus('Comparison updated.');
-    setTimeout(() => setStatus(''), 1800);
+    setStatus('Comparison updated. Titanium is ready for another run.');
+    setTimeout(() => setStatus(''), 2200);
   } catch (error) {
     setStatus(error?.message || String(error), 'error');
   } finally {
@@ -444,10 +643,7 @@ async function calculateManual() {
 $('runButton').addEventListener('click', runComparison);
 $('manualCalculate').addEventListener('click', calculateManual);
 $('detailsButton').addEventListener('click', () => {
-  const open = $('details').hidden;
-  $('details').hidden = !open;
-  $('detailsButton').textContent = open ? 'Hide details' : 'See details';
-  $('detailsButton').setAttribute('aria-expanded', String(open));
+  setDetailsOpen($('details').hidden);
 });
 
 (async () => {
