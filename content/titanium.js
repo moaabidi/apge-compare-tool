@@ -1,6 +1,6 @@
 (() => {
-  if (window.__apgeCompareTitaniumLoaded) return;
-  window.__apgeCompareTitaniumLoaded = true;
+  if (window.__apgeCompareTitaniumLoadedV2) return;
+  window.__apgeCompareTitaniumLoadedV2 = true;
 
   const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
   const upper = (value) => clean(value).toUpperCase();
@@ -49,8 +49,7 @@
 
   function findExactLabelElement(label, { visibleOnly = false } = {}) {
     const target = upper(label);
-    const nodes = document.querySelectorAll('body *');
-    for (const node of nodes) {
+    for (const node of document.querySelectorAll('body *')) {
       if (node.children.length > 3) continue;
       if (visibleOnly && !isVisible(node)) continue;
       if (upper(node.innerText || node.textContent) === target) return node;
@@ -60,7 +59,10 @@
 
   function findClickableExactText(text, { visibleOnly = true, allowRaw = false } = {}) {
     const target = upper(text);
-    const direct = document.querySelectorAll('a, button, [role="button"], [role="link"], [role="tab"], [tabindex], [aria-haspopup]');
+    const direct = document.querySelectorAll(
+      'a, button, [role="button"], [role="link"], [role="tab"], [tabindex], [aria-haspopup]'
+    );
+
     for (const node of direct) {
       if (visibleOnly && !isVisible(node)) continue;
       if (upper(node.innerText || node.textContent) === target) return node;
@@ -93,9 +95,12 @@
 
     const label = findExactLabelElement('Account', { visibleOnly: true });
     if (!label) return null;
+
     let current = label;
     for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
-      const clickable = current.querySelector?.('a, button, [role="link"], [role="button"], [tabindex]');
+      const clickable = current.querySelector?.(
+        'a, button, [role="link"], [role="button"], [tabindex]'
+      );
       if (clickable && isVisible(clickable)) return clickable;
     }
     return label;
@@ -103,6 +108,7 @@
 
   function openAccountDetail() {
     if (isAccountDetailPage()) return { ok: true, alreadyOpen: true, url: location.href };
+
     const accountLink = findAccountLink();
     if (!accountLink) {
       return {
@@ -115,34 +121,36 @@
     return { ok: true, navigating: true, url: location.href };
   }
 
-  function blockLinesForLabel(label) {
+  function blockLinesForLabel(label, maxLines = 8) {
     const element = findExactLabelElement(label);
     if (!element) return [];
     const target = upper(label);
 
     let current = element;
-    for (let depth = 0; depth < 5 && current; depth += 1, current = current.parentElement) {
+    for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
       const lines = String(current.innerText || '')
         .split(/\r?\n/)
         .map(clean)
         .filter(Boolean);
       const index = lines.findIndex((line) => upper(line) === target);
-      if (index >= 0 && lines.length > index + 1 && lines.length <= 10) {
-        return lines.slice(index + 1);
+
+      if (index >= 0 && lines.length > index + 1 && lines.length <= 14) {
+        return lines.slice(index + 1, index + 1 + maxLines);
       }
     }
     return [];
   }
 
   function firstFieldValue(label) {
-    const lines = blockLinesForLabel(label);
-    return lines[0] || '';
+    return blockLinesForLabel(label, 1)[0] || '';
+  }
+
+  function multiLineFieldValue(label, maxLines = 8) {
+    return blockLinesForLabel(label, maxLines).join(' ').trim();
   }
 
   function serviceAddress() {
-    const lines = blockLinesForLabel('SERVICE ADDRESS');
-    if (!lines.length) return '';
-    return lines.slice(0, 2).join(', ');
+    return blockLinesForLabel('SERVICE ADDRESS', 2).join(', ');
   }
 
   function contractDates() {
@@ -152,8 +160,15 @@
     let current = label;
     for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
       const text = String(current.innerText || '');
-      const dates = [...text.matchAll(/([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})/g)].map((match) => match[1]);
-      if (dates.length >= 2) return { contractStart: dates[0], contractEnd: dates[1] };
+      const marker = text.toUpperCase().indexOf('SERVICE CONTRACT');
+      if (marker < 0) continue;
+
+      const nearby = text.slice(marker, marker + 400);
+      const dates = [...nearby.matchAll(/([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})/g)]
+        .map((match) => clean(match[1]));
+      if (dates.length >= 2) {
+        return { contractStart: dates[0], contractEnd: dates[1] };
+      }
     }
     return { contractStart: '', contractEnd: '' };
   }
@@ -164,7 +179,8 @@
       if (value && value !== '—' && value.length < 100) return value;
     }
 
-    const breadcrumb = clean(document.body.innerText).match(/Customers Search\s*>\s*([^>]+?)(?:\s*>|$)/i);
+    const text = String(document.body.innerText || '');
+    const breadcrumb = text.match(/Customers Search\s*>\s*([^>\r\n]+)/i);
     return breadcrumb ? clean(breadcrumb[1]) : '';
   }
 
@@ -183,10 +199,17 @@
 
     let headerIndex = -1;
     let headers = [];
+
     for (let i = 0; i < rows.length; i += 1) {
-      const cells = [...rows[i].querySelectorAll('th, td, [role="columnheader"], [role="gridcell"], [role="cell"]')];
+      const cells = [...rows[i].querySelectorAll(
+        'th, td, [role="columnheader"], [role="gridcell"], [role="cell"]'
+      )];
       const candidateHeaders = cells.map((cell) => normalizedHeader(cell.innerText || cell.textContent));
-      if (candidateHeaders.includes('BEGIN DATE') && candidateHeaders.includes('END DATE') && candidateHeaders.includes('USAGE')) {
+      if (
+        candidateHeaders.includes('BEGIN DATE') &&
+        candidateHeaders.includes('END DATE') &&
+        candidateHeaders.includes('USAGE')
+      ) {
         headerIndex = i;
         headers = candidateHeaders;
         break;
@@ -214,10 +237,12 @@
     for (const row of rows.slice(headerIndex + 1)) {
       const cells = [...row.querySelectorAll('td, [role="gridcell"], [role="cell"]')];
       if (!cells.length) continue;
+
       const values = cells.map((cell) => clean(cell.innerText || cell.textContent));
       const get = (index) => index >= 0 ? values[index] || '' : '';
       const usage = Number(get(idx.usage).replace(/,/g, ''));
       const units = get(idx.units).toUpperCase();
+
       if (!Number.isFinite(usage) || (units && units !== 'KWH')) continue;
 
       output.push({
@@ -234,6 +259,7 @@
         chargeAmount: parseMoney(get(idx.charge))
       });
     }
+
     return output;
   }
 
@@ -248,6 +274,7 @@
 
     const parsedRoleRows = parseUsageTableFromRows(document.querySelectorAll('[role="row"]'));
     if (parsedRoleRows.length) return parsedRoleRows;
+
     return [];
   }
 
@@ -268,15 +295,17 @@
     const editRect = edit?.getBoundingClientRect();
     const candidates = [];
 
-    // Titanium renders the screenshot-confirmed ellipsis as plain text in some
-    // builds, not as a semantic button. Search every visible element for it and
-    // click its interactive ancestor (or the raw element so delegated handlers fire).
     for (const node of document.querySelectorAll('body *')) {
       if (!isVisible(node) || node.children.length > 2) continue;
+
       const text = clean(node.innerText || node.textContent);
       const aria = clean(node.getAttribute('aria-label'));
       const title = clean(node.getAttribute('title'));
-      if (!/^(?:\.\.\.|…|⋯)$/.test(text) && !/more|overflow|additional/i.test(`${aria} ${title}`)) continue;
+
+      if (
+        !/^(?:\.\.\.|…|⋯)$/.test(text) &&
+        !/more|overflow|additional/i.test(`${aria} ${title}`)
+      ) continue;
 
       const candidate = clickableAncestor(node) || node;
       const rect = candidate.getBoundingClientRect();
@@ -285,34 +314,46 @@
       candidates.push({ candidate, score: yDistance + editDistance * 0.35 });
     }
 
-    // Strong fallback for the exact Titanium layout in the screenshots: probe the
-    // pixels immediately to the left of Edit and take the element underneath the
-    // ellipsis even when it has no text/role/aria metadata.
     if (editRect) {
       const y = Math.min(window.innerHeight - 1, Math.max(1, editRect.top + editRect.height / 2));
+
       for (const offset of [8, 14, 20, 26, 32, 40, 48, 56, 64]) {
         const x = editRect.left - offset;
         if (x <= 0) continue;
-        const stack = document.elementsFromPoint(x, y);
-        for (const node of stack) {
-          if (!(node instanceof Element) || !isVisible(node) || node === edit || edit.contains(node)) continue;
+
+        for (const node of document.elementsFromPoint(x, y)) {
+          if (
+            !(node instanceof Element) ||
+            !isVisible(node) ||
+            node === edit ||
+            edit.contains(node)
+          ) continue;
+
           const candidate = clickableAncestor(node) || node;
           const rect = candidate.getBoundingClientRect();
           if (rect.right > editRect.right || rect.left >= editRect.left) continue;
           if (Math.abs((rect.top + rect.height / 2) - y) > 35) continue;
+
           candidates.push({ candidate, score: offset + 15 });
           break;
         }
       }
     }
 
-    // Previous semantic-button fallback remains useful on other Titanium builds.
-    for (const node of document.querySelectorAll('button, a, [role="button"], [tabindex], [aria-haspopup]')) {
+    for (const node of document.querySelectorAll(
+      'button, a, [role="button"], [tabindex], [aria-haspopup]'
+    )) {
       if (!isVisible(node)) continue;
+
       const text = clean(node.innerText || node.textContent);
       const aria = clean(node.getAttribute('aria-label'));
       const title = clean(node.getAttribute('title'));
-      if (!/^(?:\.\.\.|…|⋯)$/.test(text) && !/more|overflow|additional/i.test(`${aria} ${title}`)) continue;
+
+      if (
+        !/^(?:\.\.\.|…|⋯)$/.test(text) &&
+        !/more|overflow|additional/i.test(`${aria} ${title}`)
+      ) continue;
+
       const rect = node.getBoundingClientRect();
       const yDistance = referenceRect ? Math.abs(rect.top - referenceRect.top) : 0;
       const editDistance = editRect ? Math.abs(editRect.left - rect.right) : 0;
@@ -334,14 +375,15 @@
     const existing = extractUsageRows();
     if (existing.length) return existing;
 
-    // Give the account detail tab time to finish rendering its tab strip.
     const overflowCandidates = await waitFor(() => {
       const found = findOverflowCandidates();
       return found.length ? found : null;
     }, 8000, 200);
 
     if (!overflowCandidates) {
-      throw new Error('The Titanium account overflow menu (…) could not be found after waiting for the account detail tabs to load.');
+      throw new Error(
+        'The Titanium account overflow menu (…) could not be found after waiting for the account detail tabs to load.'
+      );
     }
 
     let usageItem = null;
@@ -349,14 +391,15 @@
       clickElement(candidate);
       usageItem = await waitFor(() => visibleUsageMenuItem(), 900, 75);
       if (usageItem) break;
-      // Clicking a wrong spatial candidate is harmless; close any accidental menu
-      // by clicking the same candidate again before testing the next one.
+
       clickElement(candidate);
       await sleep(75);
     }
 
     if (!usageItem) {
-      throw new Error('The three-dot area was found, but the Usage option did not appear. Titanium may be exposing the overflow trigger through a different DOM element.');
+      throw new Error(
+        'The three-dot area was found, but the Usage option did not appear. Titanium may be exposing the overflow trigger through a different DOM element.'
+      );
     }
 
     clickElement(usageItem);
@@ -368,6 +411,7 @@
     if (!rows) {
       throw new Error('The Usage page opened, but the usage table could not be read before the timeout.');
     }
+
     return rows;
   }
 
@@ -376,18 +420,16 @@
       throw new Error('Titanium is not on the account detail page yet.');
     }
 
-    // Read the account-level fields before opening Usage because Titanium swaps the
-    // account detail panel when the Usage menu item is selected.
     const commodityPriceRaw = firstFieldValue('COMMODITY PRICE');
     const commodityPriceMatch = commodityPriceRaw.match(/[0-9]+(?:\.[0-9]+)?/);
-    const commodityPrice = commodityPriceMatch ? Number(commodityPriceMatch[0]) : null;
     const { contractStart, contractEnd } = contractDates();
 
     const account = {
       customerName: customerName(),
       serviceAddress: serviceAddress(),
       meterNumber: firstFieldValue('METER NUMBER'),
-      commodityPrice,
+      commodityPrice: commodityPriceMatch ? Number(commodityPriceMatch[0]) : null,
+      pricingPlan: multiLineFieldValue('PRICING PLAN', 8),
       contractStart,
       contractEnd,
       sourceUrl: location.href
