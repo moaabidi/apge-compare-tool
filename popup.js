@@ -34,6 +34,15 @@ function isTitaniumTab(tab) {
   }
 }
 
+function isAccountDetailTab(tab) {
+  try {
+    const url = new URL(tab.url || '');
+    return url.hostname === TITANIUM_HOST && /\/sets\/[^/]+\/accounts\/[^/?#]+/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
 function isEflTab(tab) {
   try {
     const url = new URL(tab.url || '');
@@ -54,24 +63,64 @@ async function findSourceTabs() {
   const titanium = activeTitanium || mostRecent(tabs.filter(isTitaniumTab));
   const efl = mostRecent(tabs.filter(isEflTab));
 
-  if (!titanium) throw new Error('No ESG Titanium tab was found. Open the customer account page and try again.');
+  if (!titanium) throw new Error('No ESG Titanium tab was found. Open the customer page and try again.');
   if (!efl) throw new Error('No APG&E EFL tab was found. Open the proposed EFL and try again.');
   return { titanium, efl };
 }
 
-async function sendTitaniumMessage(tabId) {
-  return chrome.tabs.sendMessage(tabId, { type: 'APGE_COMPARE_COLLECT_TITANIUM' });
+async function sendTitaniumMessage(tabId, type) {
+  return chrome.tabs.sendMessage(tabId, { type });
+}
+
+async function ensureContentScript(tabId) {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: 'APGE_COMPARE_PING' });
+  } catch {
+    // PING is intentionally unsupported by older/current scripts. The send may
+    // reject even when the script exists, so actual calls below still retry with
+    // injection when needed.
+  }
+}
+
+async function messageWithInjection(tabId, type) {
+  try {
+    return await sendTitaniumMessage(tabId, type);
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content/titanium.js'] });
+    return sendTitaniumMessage(tabId, type);
+  }
+}
+
+async function waitForAccountDetail(tabId, timeoutMs = 10000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const tab = await chrome.tabs.get(tabId);
+    if (isAccountDetailTab(tab)) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return chrome.tabs.get(tabId);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('Titanium did not finish opening the Account page before the timeout.');
+}
+
+async function ensureAccountDetail(tab) {
+  if (isAccountDetailTab(tab)) return tab;
+
+  setStatus('Opening the customer Account page in Titanium…');
+  const response = await messageWithInjection(tab.id, 'APGE_COMPARE_OPEN_ACCOUNT');
+  if (!response?.ok) {
+    throw new Error(response?.error || 'The Account page could not be opened in Titanium.');
+  }
+  if (response.alreadyOpen) return chrome.tabs.get(tab.id);
+  return waitForAccountDetail(tab.id);
 }
 
 async function collectTitanium(tab) {
-  let response;
-  try {
-    response = await sendTitaniumMessage(tab.id);
-  } catch {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content/titanium.js'] });
-    response = await sendTitaniumMessage(tab.id);
-  }
+  const accountTab = await ensureAccountDetail(tab);
+  setStatus('Reading the account and opening Usage in Titanium…');
 
+  const response = await messageWithInjection(accountTab.id, 'APGE_COMPARE_COLLECT_TITANIUM');
   if (!response?.ok) throw new Error(response?.error || 'Titanium data could not be read.');
   const customer = response.data;
 
@@ -79,7 +128,7 @@ async function collectTitanium(tab) {
     throw new Error('Commodity Price could not be read from the Titanium account page.');
   }
   if (!customer.contractEnd) {
-    throw new Error('The current service contract expiration date could not be read from Titanium.');
+    throw new Error('This Titanium account does not show a current service-contract expiration date. The Account and Usage navigation can still work, but this account needs a no-active-contract rule before a projection can be generated.');
   }
   if (!Array.isArray(customer.usageRows) || customer.usageRows.length < 3) {
     const warning = customer.warnings?.[0] || 'At least 3 usage rows are required.';
@@ -239,7 +288,7 @@ async function saveResult(result) {
 }
 
 async function runComparison() {
-  setStatus('Reading Titanium and the most recently active EFL…');
+  setStatus('Finding Titanium and the most recently active EFL…');
   $('runButton').disabled = true;
   $('manualEfl').hidden = true;
 
@@ -248,6 +297,7 @@ async function runComparison() {
     state.eflUrl = efl.url;
     state.customer = await collectTitanium(titanium);
 
+    setStatus('Reading the proposed EFL…');
     let parsedEfl;
     try {
       parsedEfl = await fetchAndParseEfl(efl);
