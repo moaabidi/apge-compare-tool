@@ -72,16 +72,6 @@ async function sendTitaniumMessage(tabId, type) {
   return chrome.tabs.sendMessage(tabId, { type });
 }
 
-async function ensureContentScript(tabId) {
-  try {
-    await chrome.tabs.sendMessage(tabId, { type: 'APGE_COMPARE_PING' });
-  } catch {
-    // PING is intentionally unsupported by older/current scripts. The send may
-    // reject even when the script exists, so actual calls below still retry with
-    // injection when needed.
-  }
-}
-
 async function messageWithInjection(tabId, type) {
   try {
     return await sendTitaniumMessage(tabId, type);
@@ -89,6 +79,90 @@ async function messageWithInjection(tabId, type) {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content/titanium.js'] });
     return sendTitaniumMessage(tabId, type);
   }
+}
+
+async function collectSummaryFields(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => {
+      const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+      const upper = (value) => clean(value).toUpperCase();
+      const datePattern = /([A-Za-z]{3,9}\s+\d{1,2},\s*\d{4})/g;
+
+      function findExactLabel(label) {
+        const target = upper(label);
+        for (const node of document.querySelectorAll('body *')) {
+          if (node.children.length > 3) continue;
+          if (upper(node.innerText || node.textContent) === target) return node;
+        }
+        return null;
+      }
+
+      function linesAfterLabel(label, maxLines = 4) {
+        const element = findExactLabel(label);
+        if (!element) return [];
+        const target = upper(label);
+        let current = element;
+
+        for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
+          const lines = String(current.innerText || '')
+            .split(/\r?\n/)
+            .map(clean)
+            .filter(Boolean);
+          const index = lines.findIndex((line) => upper(line) === target);
+          if (index >= 0 && lines.length > index + 1) {
+            return lines.slice(index + 1, index + 1 + maxLines);
+          }
+        }
+        return [];
+      }
+
+      function firstField(label) {
+        return linesAfterLabel(label, 1)[0] || '';
+      }
+
+      function serviceAddress() {
+        const lines = linesAfterLabel('SERVICE ADDRESS', 2);
+        return lines.join(', ');
+      }
+
+      function contractDates() {
+        const label = findExactLabel('SERVICE CONTRACT');
+        if (!label) return { contractStart: '', contractEnd: '' };
+
+        let current = label;
+        for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
+          const text = String(current.innerText || '');
+          const marker = text.toUpperCase().indexOf('SERVICE CONTRACT');
+          if (marker < 0) continue;
+          const nearby = text.slice(marker, marker + 350);
+          const dates = [...nearby.matchAll(datePattern)].map((match) => clean(match[1]));
+          if (dates.length >= 2) {
+            return { contractStart: dates[0], contractEnd: dates[1] };
+          }
+        }
+        return { contractStart: '', contractEnd: '' };
+      }
+
+      const commodityRaw = firstField('COMMODITY PRICE');
+      const commodityMatch = commodityRaw.match(/[0-9]+(?:\.[0-9]+)?/);
+      const { contractStart, contractEnd } = contractDates();
+      const bodyText = String(document.body.innerText || '');
+      const breadcrumb = bodyText.match(/Customers Search\s*>\s*([^>\r\n]+)/i);
+
+      return {
+        customerName: breadcrumb ? clean(breadcrumb[1]) : '',
+        serviceAddress: serviceAddress(),
+        meterNumber: firstField('METER NUMBER'),
+        commodityPrice: commodityMatch ? Number(commodityMatch[0]) : null,
+        contractStart,
+        contractEnd,
+        sourceUrl: location.href
+      };
+    }
+  });
+
+  return result || {};
 }
 
 async function waitForAccountDetail(tabId, timeoutMs = 10000) {
@@ -116,19 +190,38 @@ async function ensureAccountDetail(tab) {
   return waitForAccountDetail(tab.id);
 }
 
+function preferSummary(summary, detail, key) {
+  const value = summary?.[key];
+  if (value !== undefined && value !== null && value !== '') return value;
+  return detail?.[key];
+}
+
 async function collectTitanium(tab) {
+  setStatus('Reading the customer summary in Titanium…');
+  const summary = await collectSummaryFields(tab.id);
+
   const accountTab = await ensureAccountDetail(tab);
-  setStatus('Reading the account and opening Usage in Titanium…');
+  setStatus('Opening Usage and reading billing history in Titanium…');
 
   const response = await messageWithInjection(accountTab.id, 'APGE_COMPARE_COLLECT_TITANIUM');
   if (!response?.ok) throw new Error(response?.error || 'Titanium data could not be read.');
-  const customer = response.data;
+  const detail = response.data || {};
+
+  const customer = {
+    ...detail,
+    customerName: preferSummary(summary, detail, 'customerName'),
+    serviceAddress: preferSummary(summary, detail, 'serviceAddress'),
+    meterNumber: preferSummary(summary, detail, 'meterNumber'),
+    commodityPrice: preferSummary(summary, detail, 'commodityPrice'),
+    contractStart: preferSummary(summary, detail, 'contractStart'),
+    contractEnd: preferSummary(summary, detail, 'contractEnd')
+  };
 
   if (!Number.isFinite(Number(customer.commodityPrice))) {
-    throw new Error('Commodity Price could not be read from the Titanium account page.');
+    throw new Error('Commodity Price could not be read from the Titanium customer summary or account page.');
   }
   if (!customer.contractEnd) {
-    throw new Error('This Titanium account does not show a current service-contract expiration date. The Account and Usage navigation can still work, but this account needs a no-active-contract rule before a projection can be generated.');
+    throw new Error('The Service Contract date range could not be read from the Titanium customer summary.');
   }
   if (!Array.isArray(customer.usageRows) || customer.usageRows.length < 3) {
     const warning = customer.warnings?.[0] || 'At least 3 usage rows are required.';
