@@ -1,6 +1,6 @@
 (() => {
-  if (window.__apgeCompareTitaniumLoadedV2) return;
-  window.__apgeCompareTitaniumLoadedV2 = true;
+  if (window.__apgeCompareTitaniumLoadedV3) return;
+  window.__apgeCompareTitaniumLoadedV3 = true;
 
   const clean = (value) => String(value || '').replace(/\s+/g, ' ').trim();
   const upper = (value) => clean(value).toUpperCase();
@@ -89,6 +89,80 @@
     return /\/sets\/[^/]+\/accounts\/[^/?#]+/i.test(location.pathname);
   }
 
+  function isCustomerSummaryPage() {
+    if (findExactLabelElement('Customer Summary', { visibleOnly: true })) return true;
+    return /\/customers\/customerSearch\/[^/?#]+\/?$/i.test(location.pathname);
+  }
+
+  function findCustomerSummaryBreadcrumb() {
+    const links = [...document.querySelectorAll('a[href]')].filter(isVisible);
+
+    for (const link of links) {
+      try {
+        const url = new URL(link.href, location.href);
+        if (
+          url.hostname === location.hostname &&
+          /\/customers\/customerSearch\/[^/?#]+\/?$/i.test(url.pathname) &&
+          upper(link.innerText || link.textContent) !== 'CUSTOMERS SEARCH'
+        ) {
+          return link;
+        }
+      } catch {
+        // Ignore malformed/non-navigation href values.
+      }
+    }
+
+    const customerSearch = findExactLabelElement('Customers Search', { visibleOnly: true });
+    if (customerSearch) {
+      let current = customerSearch.parentElement;
+      for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
+        const candidates = [...current.querySelectorAll('a, button, [role="link"], [role="button"], [tabindex]')]
+          .filter(isVisible)
+          .filter((node) => upper(node.innerText || node.textContent) !== 'CUSTOMERS SEARCH');
+        if (candidates.length) return candidates[0];
+      }
+    }
+
+    const bodyText = String(document.body.innerText || '');
+    const breadcrumbMatch = bodyText.match(/Customers Search\s*>\s*([^>\r\n]+)/i);
+    if (breadcrumbMatch) {
+      const customerName = clean(breadcrumbMatch[1]);
+      const byName = findClickableExactText(customerName, { visibleOnly: true, allowRaw: true });
+      if (byName) return byName;
+    }
+
+    return null;
+  }
+
+  async function normalizeToCustomerSummary() {
+    if (isCustomerSummaryPage()) return { ok: true, alreadyOpen: true };
+
+    const breadcrumb = findCustomerSummaryBreadcrumb();
+    if (!breadcrumb) {
+      return {
+        ok: false,
+        error: 'The customer-summary breadcrumb next to Customers Search could not be found.'
+      };
+    }
+
+    clickElement(breadcrumb);
+
+    const ready = await waitFor(
+      () => isCustomerSummaryPage() || findAccountLink(),
+      10000,
+      150
+    );
+
+    if (!ready) {
+      return {
+        ok: false,
+        error: 'Titanium did not finish opening Customer Summary after clicking the customer breadcrumb.'
+      };
+    }
+
+    return { ok: true, navigated: true };
+  }
+
   function findAccountLink() {
     const direct = findClickableExactText('Account', { allowRaw: true });
     if (direct) return direct;
@@ -106,14 +180,19 @@
     return label;
   }
 
-  function openAccountDetail() {
+  async function openAccountDetail() {
     if (isAccountDetailPage()) return { ok: true, alreadyOpen: true, url: location.href };
 
-    const accountLink = findAccountLink();
+    if (!isCustomerSummaryPage() || !findAccountLink()) {
+      const normalized = await normalizeToCustomerSummary();
+      if (!normalized.ok) return normalized;
+    }
+
+    const accountLink = await waitFor(() => findAccountLink(), 5000, 125);
     if (!accountLink) {
       return {
         ok: false,
-        error: 'The Account link could not be found on the Titanium customer page. Make sure the customer account card is visible.'
+        error: 'Customer Summary opened, but the Account link could not be found. Make sure the account card is visible.'
       };
     }
 
@@ -441,8 +520,10 @@
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'APGE_COMPARE_OPEN_ACCOUNT') {
-      sendResponse(openAccountDetail());
-      return false;
+      openAccountDetail()
+        .then((result) => sendResponse(result))
+        .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+      return true;
     }
 
     if (message?.type === 'APGE_COMPARE_COLLECT_TITANIUM') {
