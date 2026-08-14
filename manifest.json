@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "APG&E Compare Tool",
+  "version": "0.1.0",
+  "description": "Internal APG&E sales aid for comparing a customer's current energy pricing against one proposed EFL.",
+  "permissions": [
+    "tabs",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://affordable-ep.esgglobal.net/*",
+    "https://artemis-api.apge.com/*"
+  ],
+  "action": {
+    "default_title": "APG&E Compare Tool",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://affordable-ep.esgglobal.net/enterpriseportal/*"
+      ],
+      "js": [
+        "content/titanium.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
