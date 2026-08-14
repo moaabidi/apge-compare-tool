@@ -28,24 +28,34 @@
         <span id="customerContext"></span>
       </div>
 
-      <div class="hero">
+      <div id="hero" class="hero">
         <div id="headlineLabel" class="hero-label">Projected savings on energy</div>
         <div id="headlineAmount" class="hero-amount">$0.00</div>
         <div id="subline" class="hero-subline"></div>
       </div>
 
-      <div class="script-box">
+      <div id="scriptBox" class="script-box">
         <div class="section-label">Suggested wording</div>
         <p id="salesScript"></p>
       </div>
 
-      <button id="detailsButton" class="secondary full" type="button" aria-expanded="false">See details</button>
+      <button id="detailsButton" class="secondary full details-toggle" type="button" aria-expanded="false" aria-controls="details">
+        <span>See details</span>
+        <span class="chevron" aria-hidden="true">⌄</span>
+      </button>
 
       <div id="details" class="details" hidden>
         <section class="detail-section">
           <div class="section-header">
-            <h2>Monthly comparison</h2>
+            <h2>Term summary</h2>
             <span id="methodBadge" class="badge"></span>
+          </div>
+          <div id="termSummary" class="term-summary"></div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-header">
+            <h2>Monthly comparison</h2>
           </div>
           <div id="graph" class="graph" aria-label="Monthly current and proposed cost comparison"></div>
           <div class="table-wrap">
@@ -57,12 +67,18 @@
                   <th>Current</th>
                   <th>Proposed</th>
                   <th>Difference</th>
-                  <th id="creditHeader">Credit</th>
+                  <th id="creditHeader">Credits</th>
                 </tr>
               </thead>
               <tbody id="monthlyRows"></tbody>
             </table>
           </div>
+        </section>
+
+        <section class="detail-section">
+          <h2>Exact monthly bill breakdown</h2>
+          <p class="detail-help">Each month shows the exact components used by the calculator. TDU charges are included only when a current or proposed bill-credit plan requires a full-bill estimate.</p>
+          <div id="billBreakdowns" class="bill-breakdowns"></div>
         </section>
 
         <section class="detail-section">
